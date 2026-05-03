@@ -1,4 +1,4 @@
-# PyPBAnimation
+# PyRBAnimation
 
 Make Roblox animation smoother/jagged using Python AI-Algorithm
 
