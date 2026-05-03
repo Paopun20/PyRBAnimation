@@ -1,24 +1,3 @@
-"""
-anim_gan.py  —  Roblox animation smoother / jaggifier
-------------------------------------------------------
-Export JSON from Roblox (Lua exportAnimation), process here, import back.
-
-Usage
------
-  # smooth + 3x more keyframes
-  python anim_gan.py --input anim.json --mode smooth --upsample 3 --output out.json
-
-  # jagged
-  python anim_gan.py --input anim.json --mode jagged --blend 0.55 --output out.json
-
-  # smooth without GAN (spline only, fast)
-  python anim_gan.py --input anim.json --mode smooth --no-gan --output out.json
-
-Install
--------
-  pip install torch scipy numpy
-"""
-
 import json, math, copy, argparse
 import numpy as np
 import torch
@@ -197,9 +176,7 @@ def spline_upsample(times, tensor, factor):
         for d in range(D):
             if kind == "cubic":
                 # clamped = zero first-derivative at endpoints, prevents start/end overshoot
-                out[:, b, d] = CubicSpline(times, tensor[:, b, d], bc_type="clamped")(
-                    nt
-                )
+                out[:, b, d] = CubicSpline(times, tensor[:, b, d], bc_type="clamped")(nt)
             else:
                 out[:, b, d] = np.interp(nt, times, tensor[:, b, d])
     return nt, renorm(out)
@@ -208,45 +185,16 @@ def spline_upsample(times, tensor, factor):
 def gauss_smooth(tensor, sigma):
     # mode='nearest' clamps boundary values, no ripple at frame 0
     return renorm(
-        gaussian_filter1d(tensor, sigma=sigma, axis=0, mode="nearest").astype(
-            np.float32
-        )
+        gaussian_filter1d(tensor, sigma=sigma, axis=0, mode="nearest").astype(np.float32)
     )
 
 
 def jitter(tensor, ps=0.05, rs=0.025):
-    """IID per-frame noise — GAN training only, not used for jagged output."""
+    """IID per-frame noise — GAN training only."""
     out = tensor.copy()
     out[:, :, 0:3] += (np.random.randn(*out[:, :, 0:3].shape) * ps).astype(np.float32)
     out[:, :, 3:7] += (np.random.randn(*out[:, :, 3:7].shape) * rs).astype(np.float32)
     return renorm(out)
-
-
-def correlated_noise(tensor, ps=0.05, rs=0.025, roughness=0.35):
-    """
-    Low-frequency correlated noise that looks like real motion roughness.
-    roughness=0 → slow body sway, roughness=1 → frame-level jitter.
-    60% shared across all bones (whole-body feel) + 40% per-bone independent.
-    """
-    T, B, D = tensor.shape
-    n_coarse = max(2, int(T * roughness))
-    ct = np.linspace(0, 1, n_coarse)
-    ft = np.linspace(0, 1, T)
-
-    def interp_noise(n_coarse, dims):
-        raw = np.random.randn(n_coarse, dims).astype(np.float32)
-        return np.stack([np.interp(ft, ct, raw[:, i]) for i in range(dims)], axis=1)
-
-    shared_pos = interp_noise(n_coarse, 3)
-    shared_rot = interp_noise(n_coarse, 4)
-    noise = np.zeros_like(tensor)
-    for b in range(B):
-        bone_pos = interp_noise(n_coarse, 3)
-        bone_rot = interp_noise(n_coarse, 4)
-        noise[:, b, 0:3] = (0.6 * shared_pos + 0.4 * bone_pos) * ps
-        noise[:, b, 3:7] = (0.6 * shared_rot + 0.4 * bone_rot) * rs
-
-    return renorm((tensor + noise).astype(np.float32))
 
 
 # ── GAN ──────────────────────────────────────────────────────────────────────
@@ -330,7 +278,7 @@ def apply_G(G, tensor):
     return renorm(out.astype(np.float32))
 
 
-# ── Pipelines ────────────────────────────────────────────────────────────────
+# ── Pipeline ─────────────────────────────────────────────────────────────────
 
 
 def smooth_pipeline(times, tensor, upsample, sigma, use_gan, epochs):
@@ -346,21 +294,6 @@ def smooth_pipeline(times, tensor, upsample, sigma, use_gan, epochs):
     return times, tensor
 
 
-def jagged_pipeline(times, tensor, blend, ps, rs, roughness, use_gan, epochs):
-    noisy = correlated_noise(tensor, ps, rs, roughness)
-    if use_gan:
-        print(f"  GAN ({epochs} epochs) — partially denoises correlated noise")
-        smooth = gauss_smooth(tensor, sigma=1.2)
-        G = train_gan(smooth, epochs)
-        # GAN trained on clean, applied to noisy → partial cleanup = natural roughness
-        gan_out = apply_G(G, correlated_noise(tensor, ps * 2.5, rs * 2.5, roughness))
-        tensor = (1 - blend) * tensor + blend * gan_out
-    else:
-        print(f"  correlated noise  roughness={roughness}  blend={blend}")
-        tensor = (1 - blend) * tensor + blend * noisy
-    return times, tensor
-
-
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -368,7 +301,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
-    ap.add_argument("--mode", default="smooth", choices=["smooth", "jagged"])
     ap.add_argument(
         "--upsample", type=int, default=3, help="Keyframe multiplier (default 3)"
     )
@@ -376,15 +308,6 @@ def main():
         "--sigma", type=float, default=1.5, help="Gaussian sigma (default 1.5)"
     )
     ap.add_argument("--epochs", type=int, default=800)
-    ap.add_argument("--blend", type=float, default=0.6, help="Jagged blend 0-1")
-    ap.add_argument("--pos-std", type=float, default=0.06)
-    ap.add_argument("--rot-std", type=float, default=0.03)
-    ap.add_argument(
-        "--roughness",
-        type=float,
-        default=0.35,
-        help="Jagged frequency: 0=slow sway, 1=per-frame flicker (default 0.35)",
-    )
     ap.add_argument(
         "--no-gan", action="store_true", help="Skip GAN, spline/gaussian only"
     )
@@ -401,24 +324,11 @@ def main():
 
     saved_times, saved_tensor = times.copy(), tensor.copy()
 
-    print(f"\n── Mode: {args.mode.upper()}  (GAN={'off' if args.no_gan else 'on'})")
-    if args.mode == "smooth":
-        times, tensor = smooth_pipeline(
-            times, tensor, args.upsample, args.sigma, not args.no_gan, args.epochs
-        )
-    else:
-        times, tensor = jagged_pipeline(
-            times,
-            tensor,
-            args.blend,
-            args.pos_std,
-            args.rot_std,
-            args.roughness,
-            not args.no_gan,
-            args.epochs,
-        )
+    print(f"\n── Smoothing  (GAN={'off' if args.no_gan else 'on'})")
+    times, tensor = smooth_pipeline(
+        times, tensor, args.upsample, args.sigma, not args.no_gan, args.epochs
+    )
 
-    # report
     print(f"\n── Diff report")
     print(f"   keyframes: {orig_T} → {len(times)}")
     if len(times) == len(saved_times):
